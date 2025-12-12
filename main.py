@@ -103,8 +103,18 @@ def main():
     cfg["device"] = device
     np.random.seed(cfg["seed"])
     torch.manual_seed(cfg["seed"])
+
+    # --------------------------------------------------------------- #
+    #                     Setting Up the Trainer                    #
+    # --------------------------------------------------------------- #
+    agent_class_map = {
+        "reinforce": ReinforceAgent,
+        "sarsa": SarsaAgent,
+        # "QLearningAgent": QLearningAgent
+    }
     
-    trainer = SarsaAgent(cfg)
+    agent_class = agent_class_map[cfg["algorithm"]]
+    trainer = agent_class(cfg)
     rewards = trainer.train()
     
     save_rewards_to_csv(rewards, cfg["learning_rate"], cfg["gamma"], cfg.get("use_boltzmann", False))
@@ -121,10 +131,14 @@ if __name__ == "__main__":
         help="Run training in parallel with different hyperparameters."
     )
 
-    
     parser.add_argument(
         "--num_processes", type=int, default=2,
         help="Number of processes to use for parallel training."
+    )
+
+    parser.add_argument(
+        "--config_file", type=str, default="global_config.json",
+        help="Path to the global configuration file."
     )
 
     args = parser.parse_args()

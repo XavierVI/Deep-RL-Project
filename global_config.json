@@ -1,8 +1,8 @@
 {
     "seed": 42,
-    "env_name": "BidpedalWalker-v3",
+    "env_name": "BipedalWalker-v3",
     "action_space_type": "continuous",
-    "display": false,
+    "display": true,
     "display_episodes":100,
     "num_episodes": 3000,
     "max_steps": 500,
@@ -10,6 +10,8 @@
     "activation_function": "relu",
     "learning_rate": 0.001,
     "gamma": 0.99,
+
+    "algorithm": "reinforce",
     
     "reinforce_initial_epsilon": 1.0,
     "reinforce_min_epsilon": 0.001,

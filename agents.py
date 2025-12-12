@@ -32,6 +32,7 @@ class SarsaQNet(nn.Module):
 
 
 class PolicyNet(nn.Module):
+    """Policy network for discrete action spaces."""
     def __init__(self, s_dim, a_dim, hidden, act):
         super().__init__()
 
@@ -56,6 +57,36 @@ class PolicyNet(nn.Module):
 
         # return logits and action probabilities
         return x, F.softmax(x, dim=-1)
+
+
+class ContinuousPolicyNet(nn.Module):
+    """Policy network for continuous action spaces using Gaussian policy."""
+    def __init__(self, s_dim, a_dim, hidden, act):
+        super().__init__()
+
+        act_fn = getattr(F, act)
+        print(f"Using activation function: {act}")
+        self.layers = nn.ModuleList()
+        prev = s_dim
+        
+        for h in hidden:
+            self.layers.append(nn.Linear(prev, h))
+            prev = h
+        
+        # Output mean and log_std for Gaussian policy
+        self.mean = nn.Linear(prev, a_dim)
+        self.log_std = nn.Linear(prev, a_dim)
+        self.act_fn = act_fn
+    
+    def forward(self, x):
+        for l in self.layers:
+            x = self.act_fn(l(x))
+
+        mean = torch.tanh(self.mean(x))  # Bound mean to [-1, 1]
+        log_std = self.log_std(x)
+        log_std = torch.clamp(log_std, -20, 2)  # Prevent numerical instability
+        
+        return mean, log_std
 
 
 
@@ -267,13 +298,23 @@ class ReinforceAgent(BaseAgent):
         super().__init__(cfg)
         
         self.use_baseline = cfg.get("reinforce_use_baseline", False)
+        self.action_space_type = cfg.get("action_space_type", "discrete")
         
-        self.policy = PolicyNet(
-            self.state_dim,
-            self.action_dim,
-            cfg["hidden_layers"],
-            cfg["activation_function"]
-        ).to(self.device)
+        if self.action_space_type == "continuous":
+            self.policy = ContinuousPolicyNet(
+                self.state_dim,
+                self.action_dim,
+                cfg["hidden_layers"],
+                cfg["activation_function"]
+            ).to(self.device)
+        else:
+            self.policy = PolicyNet(
+                self.state_dim,
+                self.action_dim,
+                cfg["hidden_layers"],
+                cfg["activation_function"]
+            ).to(self.device)
+        
         self.opt = optim.Adam(self.policy.parameters(), lr=cfg["learning_rate"])
 
         if self.use_baseline:
@@ -283,41 +324,59 @@ class ReinforceAgent(BaseAgent):
     def _get_agent_prefix(self):
         return "reinforce"
 
-    def select_action(self, state):
-        # fetch the action probabilities from the policy network
-        # (probability for each action)
-        logits_t, probs_t = self.policy(
-            torch.FloatTensor(state).unsqueeze(0).to(self.device)
-        )
-        logits_t = logits_t.squeeze()
-        probs_t = probs_t.squeeze()
-
-        if self.use_boltzmann:
-            # Numerically stable softmax with temperature
-            scaled_logits = logits_t / self.tau
-            boltz_probs = torch.softmax(scaled_logits, dim=-1)
-            action = torch.multinomial(boltz_probs, 1).item()
-            log_prob = torch.log(torch.clamp(boltz_probs[action], min=1e-8))
+    def select_action(self, state: np.array):
+        state_t = torch.FloatTensor(state).unsqueeze(0).to(self.device)
+        
+        if self.action_space_type == "continuous":
+            # Continuous action space using Gaussian policy
+            mean, log_std = self.policy(state_t)
+            mean = mean.squeeze()
+            log_std = log_std.squeeze()
+            std = torch.exp(log_std)
             
-            return action, log_prob
+            # Add temperature/exploration scaling
+            if self.use_boltzmann:
+                std = std * self.tau
+            
+            # Sample action from Gaussian distribution
+            dist = torch.distributions.Normal(mean, std)
+            action_t = dist.sample()
+            action_t = torch.clamp(action_t, -1, 1)
+            
+            # Compute log probability by summing over action dimensions
+            log_prob = dist.log_prob(action_t).sum()
+            
+            return action_t.cpu().numpy(), log_prob
+        
+        else:  # Discrete action space
+            logits_t, probs_t = self.policy(state_t)
+            logits_t = logits_t.squeeze()
+            probs_t = probs_t.squeeze()
 
-        else:
-            # Epsilon-greedy
-            if np.random.rand() < self.epsilon:
-                action = np.random.randint(self.action_dim)
+            if self.use_boltzmann:
+                # Numerically stable softmax with temperature
+                scaled_logits = logits_t / self.tau
+                boltz_probs = torch.softmax(scaled_logits, dim=-1)
+                action = torch.multinomial(boltz_probs, 1).item()
+                log_prob = torch.log(torch.clamp(boltz_probs[action], min=1e-8))
+                
+                return action, log_prob
 
             else:
-                # create a categorical distribution over the actions
-                dist = torch.distributions.Categorical(probs=probs_t)
-                # sample an action from the distribution
-                action = dist.sample()
-                action = action.item()
+                # Epsilon-greedy
+                if np.random.rand() < self.epsilon:
+                    action = np.random.randint(self.action_dim)
+                else:
+                    # create a categorical distribution over the actions
+                    dist = torch.distributions.Categorical(probs=probs_t)
+                    # sample an action from the distribution
+                    action = dist.sample()
+                    action = action.item()
 
-        log_prob = torch.log(torch.clamp(probs_t[action], min=1e-8))
+            log_prob = torch.log(torch.clamp(probs_t[action], min=1e-8))
+            return action, log_prob
 
-        return action, log_prob
-
-    def update(self, log_probs, rewards, states):
+    def update(self, log_probs, rewards, states: np.array):
         R, returns = 0, []
 
         for r in reversed(rewards):
@@ -371,6 +430,8 @@ class ReinforceAgent(BaseAgent):
                 if done or trunc:
                     break
 
+            # convert to numpy array for better performance
+            states = np.array(states)
             self.update(log_probs, rewards, states)
             self.decay_epsilon()
             rewards_all.append(total)

@@ -5,6 +5,6 @@ __pycache__/
 *.pdb
 *.egg
 *.egg-info/
-
+.vscode/
 *.csv
 *.png
