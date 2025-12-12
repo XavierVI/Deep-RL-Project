@@ -1,6 +1,7 @@
 {
     "seed": 42,
-    "env_name": "LunarLander-v3",
+    "env_name": "BidpedalWalker-v3",
+    "action_space_type": "continuous",
     "display": false,
     "display_episodes":100,
     "num_episodes": 3000,

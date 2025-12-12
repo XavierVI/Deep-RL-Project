@@ -4,6 +4,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
+from abc import ABC, abstractmethod
 
 # --------------------------------------------------------------- #
 #                     Policy Class Definitions                    #
@@ -61,43 +62,108 @@ class PolicyNet(nn.Module):
 # --------------------------------------------------------------- #
 #                     Agent Class Definitions                     #
 # --------------------------------------------------------------- #
-class SarsaAgent:
+class BaseAgent(ABC):
+    """Abstract base class for all agents with common functionality."""
+    
     def __init__(self, cfg):
-        # environment setup
+        # Environment setup
         self.env = gym.make(cfg["env_name"], render_mode=None)
         self.render_env = gym.make(cfg["env_name"], render_mode="human")
         self.display = cfg.get("display", False)
         self.device = cfg.get("device", torch.device("cpu"))
-
-        # state and action dimensions
-        self.state_dim = self.env.observation_space.shape[0]
-        self.action_dim = self.env.action_space.n
-
-        # hyperparameters
-        self.gamma = cfg["gamma"]
-        self.use_boltzmann = cfg.get("sarsa_use_boltzmann", False)
-
-        # epsilon-greedy parameters
-        self.epsilon = cfg["sarsa_initial_epsilon"]
-        self.min_epsilon = cfg["sarsa_min_epsilon"]
-        self.decay = cfg["sarsa_decay_rate"]
         
-        # boltzmann parameters
-        self.tau = cfg["sarsa_initial_tau"]
-        self.min_tau = cfg["sarsa_min_tau"]
-        self.decay_rate_tau = cfg["sarsa_decay_rate_tau"]
-
+        # State and action dimensions
+        self.state_dim = self.env.observation_space.shape[0]
+        self._setup_action_dim(cfg)
+        
+        # Common hyperparameters
+        self.gamma = cfg["gamma"]
         self.render_int = cfg.get("display_episodes", 100)
-        self.num_episodes = cfg["num_episodes"]
+        self.num_episodes = cfg.get("num_episodes", cfg.get("episodes", 1000))
         self.max_steps = cfg.get("max_steps", 200)
+        
+        # Exploration parameters
+        self.use_boltzmann = cfg.get(f"{self._get_agent_prefix()}_use_boltzmann", False)
+        self._setup_exploration_params(cfg)
+        
+    def _setup_action_dim(self, cfg):
+        """Setup action dimension based on action space type."""
+        try:
+            action_space_type = cfg["action_space_type"]
+            if action_space_type == "continuous":
+                self.action_dim = self.env.action_space.shape[0]
+            else:
+                self.action_dim = self.env.action_space.n
 
-        # policy network, optimizer, and loss function
+        except KeyError:
+            raise ValueError("action_space_type not specified in config. Please specify 'discrete' or 'continuous'.")
+    
+    def _setup_exploration_params(self, cfg):
+        """Setup epsilon-greedy or Boltzmann exploration parameters."""
+        prefix = self._get_agent_prefix()
+        
+        try:
+            # Epsilon-greedy parameters
+            self.epsilon = cfg[f"{prefix}_initial_epsilon"]
+            self.min_epsilon = cfg[f"{prefix}_min_epsilon"]
+            self.decay = cfg[f"{prefix}_decay_rate"]
+            
+            # Boltzmann parameters
+            self.tau = cfg[f"{prefix}_initial_tau"]
+            self.min_tau = cfg[f"{prefix}_min_tau"]
+            self.decay_rate_tau = cfg[f"{prefix}_decay_rate_tau"]
+
+        except KeyError:
+            raise ValueError(f"Missing exploration parameters for agent type: {prefix}")
+    
+    @abstractmethod
+    def _get_agent_prefix(self):
+        """Return the config prefix for this agent type (e.g., 'sarsa', 'reinforce')."""
+        pass
+    
+    def decay_epsilon(self):
+        """Decay epsilon or tau for exploration."""
+        if self.use_boltzmann:
+            self.tau = max(self.min_tau, self.tau * np.exp(-self.decay_rate_tau))
+        else:
+            self.epsilon = max(self.min_epsilon, self.epsilon * np.exp(-self.decay))
+    
+    def get_env(self, episode):
+        """Get the appropriate environment (render or non-render) for the episode."""
+        return self.render_env if self.display and (episode + 1) % self.render_int == 0 else self.env
+    
+    def print_progress(self, episode, total_reward, rewards_history):
+        """Print training progress."""
+        if (episode + 1) % self.render_int == 0:
+            avg_reward = np.mean(rewards_history[-20:]) if rewards_history else 0
+            exploration_param = f"τ={self.tau:.3f}" if self.use_boltzmann else f"ε={self.epsilon:.3f}"
+            print(f"Episode {episode+1}/{self.num_episodes} | Reward {total_reward:.1f} | "
+                  f"Avg {avg_reward:.1f} | {exploration_param}", flush=True)
+    
+    @abstractmethod
+    def select_action(self, state):
+        """Select an action given the current state."""
+        pass
+    
+    @abstractmethod
+    def train(self):
+        """Main training loop."""
+        pass
+
+
+class SarsaAgent(BaseAgent):
+    def __init__(self, cfg):
+        super().__init__(cfg)
+        
+        # Policy network, optimizer, and loss function
         self.q_net = SarsaQNet(
             self.state_dim, self.action_dim,
             cfg["hidden_layers"], cfg["activation_function"]).to(self.device)
-
         self.opt = optim.Adam(self.q_net.parameters(), lr=cfg["learning_rate"])
         self.criterion = nn.MSELoss()
+    
+    def _get_agent_prefix(self):
+        return "sarsa"
 
     def select_action(self, state: torch.Tensor):
         """
@@ -126,32 +192,14 @@ class SarsaAgent:
 
         return action
 
-    def decay_epsilon(self):
-        """
-        Decay epsilon or tau.
-        """
-        if self.use_boltzmann:
-            self.tau = max(
-                self.min_tau, self.tau * np.exp(-self.decay_rate_tau))
-        else:
-            self.epsilon = max(
-                self.min_epsilon, self.epsilon * np.exp(-self.decay))
-
-    # Additional methods for training would go here
     def train(self):
-        """
-        SARSA training loop implementation.
-        """
+        """SARSA training loop implementation."""
         print(f"Starting training with parameters gamma={self.gamma}, use_boltzmann={self.use_boltzmann}...")
         rewards_all = []
 
         for m in range(self.num_episodes):
-            # total rewards for this episode
             total = 0
-
-            env = self.render_env \
-                if self.display and (m + 1) % self.render_int == 0 \
-                else self.env
+            env = self.get_env(m)
             
             # ==== EXPERIENCE COLLECTION PHASE ====
             experiences = []
@@ -178,8 +226,6 @@ class SarsaAgent:
                     break
 
             # ==== BATCH UPDATE PHASE ====
-            # Convert experiences to batched tensors for parallel processing
-            # First convert to numpy arrays, then to tensors (faster)
             states = torch.FloatTensor(
                 np.array([exp[0] for exp in experiences])).to(self.device)
             actions = torch.LongTensor(
@@ -193,85 +239,49 @@ class SarsaAgent:
             dones = torch.FloatTensor(
                 np.array([exp[5] for exp in experiences])).to(self.device)
 
-            # Compute all Q-values in parallel (batched forward pass)
+            # Compute Q-values and targets
             q_values = self.q_net(states)
-            # print("----- Q VALUES -----")
-            # print(q_values.size())
-            # Gather the predicted Q-values for the taken actions (actions.unsqueeze(1))
             pred_q_values = q_values.gather(1, actions.unsqueeze(1)).squeeze(1)
 
-            # print("----- PREDICTED Q VALUES -----")
-            # print(pred_q_values.size())
-
-            # Compute target Q-values in parallel
             with torch.no_grad():
                 next_q_values = self.q_net(next_states)
                 next_q_for_actions = next_q_values.gather(
                     1, next_actions.unsqueeze(1)).squeeze(1)
                 targets = rewards + self.gamma * next_q_for_actions * (1 - dones)
 
-            # Single backward pass for entire episode
+            # Update network
             loss = self.criterion(pred_q_values, targets)
             self.opt.zero_grad()
             loss.backward()
             self.opt.step()
 
             rewards_all.append(total)
-            if self.use_boltzmann and (m + 1) % self.render_int == 0:
-                print(
-                    f"Episode {m+1}/{self.num_episodes} | Reward {total:.1f} | Avg {np.mean(rewards_all[-20:]):.1f} | τ={self.tau:.3f}", flush=True)
-            elif (m + 1) % self.render_int == 0:
-                print(
-                    f"Episode {m+1}/{self.num_episodes} | Reward {total:.1f} | Avg {np.mean(rewards_all[-20:]):.1f} | ε={self.epsilon:.3f}", flush=True)
-
+            self.print_progress(m, total, rewards_all)
             self.decay_epsilon()
 
         return rewards_all
 
 
-class ReinforceAgent:
+class ReinforceAgent(BaseAgent):
     def __init__(self, cfg):
-        self.env = gym.make(cfg["env_name"], render_mode=None)
-        self.render_env = gym.make(cfg["env_name"], render_mode="human")
-        self.display = cfg["display"]
-        self.device = cfg["device"]
+        super().__init__(cfg)
         
-        self.state_dim = self.env.observation_space.shape[0]
-        self.action_dim = self.env.action_space.n
+        self.use_baseline = cfg.get("reinforce_use_baseline", False)
         
-        self.gamma = cfg["gamma"]
-        self.use_boltzmann = cfg["reinforce_use_boltzmann"]
-
-        # epsilon-greedy parameters
-        self.epsilon = cfg["reinforce_initial_epsilon"]
-        self.min_epsilon = cfg["reinforce_min_epsilon"]
-        self.decay = cfg["reinforce_decay_rate"]
-        
-        # boltzmann parameters
-        self.tau = cfg["reinforce_initial_tau"]
-        self.min_tau = cfg["reinforce_min_tau"]
-        self.decay_rate_tau = cfg["reinforce_decay_rate_tau"]
-
-        self.render_int = cfg["display_episodes"]
-        self.use_baseline = cfg["reinforce_use_baseline"]
-
-        self.episodes = cfg["num_episodes"]
-        self.max_steps = cfg["max_steps"]
-
         self.policy = PolicyNet(
             self.state_dim,
             self.action_dim,
             cfg["hidden_layers"],
             cfg["activation_function"]
         ).to(self.device)
-        self.opt = optim.Adam(
-            self.policy.parameters(),
-            lr=cfg["learning_rate"]
-        )
+        self.opt = optim.Adam(self.policy.parameters(), lr=cfg["learning_rate"])
 
         if self.use_baseline:
             self.baseline = nn.Linear(self.state_dim, 1).to(self.device)
             self.baseline_opt = optim.Adam(self.baseline.parameters(), lr=cfg["learning_rate"])
+    
+    def _get_agent_prefix(self):
+        return "reinforce"
 
     def select_action(self, state):
         # fetch the action probabilities from the policy network
@@ -333,33 +343,19 @@ class ReinforceAgent:
         loss.backward()
         self.opt.step()
 
-    def decay_epsilon(self):
-        """
-        Decay epsilon or tau.
-        """
-        if self.use_boltzmann:
-            self.tau = max(
-                self.min_tau, self.tau * np.exp(-self.decay_rate_tau))
-        else:
-            self.epsilon = max(
-                self.min_epsilon, self.epsilon * np.exp(-self.decay))
-
-
     def train(self):
+        """REINFORCE training loop implementation."""
         print(f"Starting training with parameters gamma={self.gamma}, use_boltzmann={self.use_boltzmann}...")
         rewards_all = []
 
-        for ep in range(self.episodes):
-            env = self.render_env \
-                if (ep + 1) % self.render_int == 0 and self.display \
-                else self.env
+        for ep in range(self.num_episodes):
+            env = self.get_env(ep)
             state, _ = env.reset()
             log_probs, rewards, states = [], [], []
             total = 0
 
             for t in range(self.max_steps):
                 action, log_prob = self.select_action(state)
-
                 log_probs.append(log_prob)
                 
                 next_state, reward, done, trunc, _ = env.step(action)
@@ -378,29 +374,23 @@ class ReinforceAgent:
             self.update(log_probs, rewards, states)
             self.decay_epsilon()
             rewards_all.append(total)
-            
-            if self.use_boltzmann and (ep + 1) % self.render_int == 0:
-                print(
-                    f"Episode {ep+1}/{self.episodes} | Reward {total:.1f} | Avg {np.mean(rewards_all[-20:]):.1f} | τ={self.tau:.3f}", flush=True)
-            elif (ep + 1) % self.render_int == 0:
-                print(
-                    f"Episode {ep+1}/{self.episodes} | Reward {total:.1f} | Avg {np.mean(rewards_all[-20:]):.1f} | ε={self.epsilon:.3f}", flush=True)
+            self.print_progress(ep, total, rewards_all)
 
         return rewards_all
 
 
-class PPOAgent:
+class PPOAgent(BaseAgent):
     def __init__(self, cfg):
-        pass
-
+        super().__init__(cfg)
+    
+    def _get_agent_prefix(self):
+        return "ppo"
     
     def select_action(self, state):
         pass
-
 
     def update(self, trajectories):
         pass
     
     def train(self):
         pass
-
