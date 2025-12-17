@@ -16,15 +16,20 @@ class BaseAgent(ABC):
     """Abstract base class for all agents with common functionality."""
     
     def __init__(self, cfg):
-        # Environment setup
-        self.env = gym.make(cfg["env_name"], render_mode=None)
-        self.render_env = gym.make(cfg["env_name"], render_mode="human")
-        self.display = cfg.get("display", False)
+        # Environment setup (may create vectorized envs)
         self.device = cfg.get("device", torch.device("cpu"))
-        
-        # Read state and action dimensions
-        self.state_dim = self.env.observation_space.shape[0]
-        self._setup_action_dim(cfg)
+        self._setup_environment(cfg)
+
+        # Setup state and action space dimensions
+        if hasattr(self.env, "single_observation_space"):
+            self.state_dim = self.env.single_observation_space.shape[0]
+        else:
+            self.state_dim = self.env.observation_space.shape[0]
+
+        if hasattr(self.env, "single_action_space"):
+            self._setup_action_dim_parallel(cfg)
+        else:
+            self._setup_action_dim(cfg)
         
         # Setup common hyperparameters
         self.gamma = cfg["gamma"]
@@ -35,7 +40,44 @@ class BaseAgent(ABC):
         # Exploration parameters
         # let each one decide if they want to set up these parameters
         # self._setup_exploration_params(cfg)
-        
+
+    def _setup_environment(self, cfg):
+        """Setup environment based on config."""
+        # for parallel environments, create a synchronous VectorEnv
+        if cfg.get("parallel_envs", False):
+            self.num_envs = cfg.get("num_envs", 2)
+
+            # no render for vectorized envs
+            # self.env = gym.vector.SyncVectorEnv(env_fns)
+            self.env = gym.make_vec(
+                cfg["env_name"],
+                num_envs=self.num_envs,
+                render_mode=None,
+                vectorization_mode="sync"
+            )
+            # do not use human render with vector envs
+            self.render_env = None
+            self.display = False
+
+        else:
+            self.env = gym.make(cfg["env_name"], render_mode=None)
+            self.render_env = gym.make(cfg["env_name"], render_mode="human")
+            self.display = cfg.get("display", False)
+            self.num_envs = 1
+
+    def _setup_action_dim_parallel(self, cfg):
+        """Setup action dimension for vectorized environments."""
+        try:
+            self.action_space_type = cfg["action_space_type"]
+            if self.action_space_type == "continuous":
+                self.action_dim = self.env.single_action_space.shape[0]
+            else:
+                self.action_dim = self.env.single_action_space.n
+
+        except KeyError:
+            raise ValueError("action_space_type not specified in config. Please specify 'discrete' or 'continuous'.")
+
+
     def _setup_action_dim(self, cfg):
         """Setup action dimension based on action space type."""
         try:
@@ -620,7 +662,87 @@ class A2CAgent(BaseAgent):
 
 
     def train_parallel(self):
-        pass
+        """Train using synchronous vectorized environments.
+
+        Collects `N`-step rollouts for each parallel environment, concatenates
+        per-environment trajectories (so each env's transitions are contiguous),
+        and calls `update()` with the flattened lists.
+        Falls back to `train()` if not running with multiple envs.
+        """
+        # Fallback to regular train if not vectorized
+        if getattr(self, "num_envs", 1) <= 1:
+            return self.train()
+
+        env = self.env
+        rewards_all = []
+
+        rollout_len = min(self.N, self.max_steps)
+
+        for ep in range(self.num_episodes):
+            # reset returns (obs, info) for gymnasium
+            obs, _ = env.reset()
+            # obs shape: (num_envs, state_dim)
+
+            # Per-env buffers
+            num_envs = self.num_envs
+            states_bufs = [[obs[i]] for i in range(num_envs)]
+            rewards_bufs = [[] for _ in range(num_envs)]
+            dones_bufs = [[] for _ in range(num_envs)]
+            logp_bufs = [[] for _ in range(num_envs)]
+            ent_bufs = [[] for _ in range(num_envs)]
+            total_rewards = np.zeros(num_envs, dtype=float)
+
+            # Collect rollout_len steps
+            for t in range(rollout_len):
+                # select actions for each env (do not vectorize actor here)
+                actions = []
+                for i in range(num_envs):
+                    a, lp, ent = self.select_action(states_bufs[i][-1])
+                    actions.append(a)
+                    logp_bufs[i].append(lp)
+                    ent_bufs[i].append(ent)
+
+                # prepare action array for vector env
+                if self.action_space_type == "continuous":
+                    actions_arr = np.stack(actions)
+                else:
+                    actions_arr = np.array(actions)
+
+                next_obs, rewards, terminations, truncations, infos = env.step(actions_arr)
+
+                for i in range(num_envs):
+                    rewards_bufs[i].append(rewards[i])
+                    dones_bufs[i].append(bool(terminations[i] or truncations[i]))
+                    states_bufs[i].append(next_obs[i])
+                    total_rewards[i] += rewards[i]
+
+            # Flatten per-env buffers into global lists with env-major ordering
+            flat_states = []
+            flat_rewards = []
+            flat_dones = []
+            flat_logp = []
+            flat_ent = []
+
+            for i in range(num_envs):
+                # each states_bufs[i] is length rollout_len+1
+                flat_states.extend(states_bufs[i])
+                flat_rewards.extend(rewards_bufs[i])
+                flat_dones.extend(dones_bufs[i])
+                flat_logp.extend(logp_bufs[i])
+                flat_ent.extend(ent_bufs[i])
+
+            # convert states to numpy array shape (N_total+1, state_dim)
+            flat_states = np.array(flat_states)
+
+            # call update with flattened sequences
+            self.update(flat_logp, flat_ent, flat_rewards, flat_states, flat_dones)
+
+            # record mean reward across envs for this rollout
+            avg_total = float(np.mean(total_rewards))
+            rewards_all.append(avg_total)
+            self.print_progress(ep, avg_total, rewards_all)
+
+        return rewards_all
 
 
 class PPOAgent(BaseAgent):
