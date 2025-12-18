@@ -504,7 +504,7 @@ class A2CAgent(BaseAgent):
             return action, log_prob, entropy
 
 
-    def N_step_return(self, rewards_t, dones_t, Vs, N):
+    def N_step_return(self, rewards_t, dones_t, Vs, T):
         """
         Computes the advantages and target values using the
         N-step approximation for Q(s, a).
@@ -515,16 +515,16 @@ class A2CAgent(BaseAgent):
             rewards_t (torch.Tensor): list of rewards for each state-action pair.
             dones_t (torch.Tensor): list of done flags for each state-action pair.
             Vs (torch.Tensor): list of state values for each state.
-            N (int): number of steps in the trajectory.
+            T (int): number of steps in the trajectory.
         Returns:
             advantages (torch.Tensor): list of advantages for each state-action pair.
             targets (torch.Tensor): list of target values for each state-action pair.
         """
         with torch.no_grad():
-            rets = torch.zeros(N, device=self.device)
+            rets = torch.zeros(T, self.num_envs, device=self.device)
             future_ret = Vs[-1] * (1 - dones_t[-1])
 
-            for t in reversed(range(N)):
+            for t in reversed(range(min(self.N, T))):
                 rets[t] = rewards_t[t] + self.gamma * \
                     future_ret * (1 - dones_t[t])
                 future_ret = rets[t]
@@ -536,7 +536,7 @@ class A2CAgent(BaseAgent):
 
             return advantages, targets
 
-    def gae(self, rewards_t, dones_t, Vs, N):
+    def gae(self, rewards_t, dones_t, Vs, T):
         """
         This function computes the advantages and target values using the
         Generalized Advantage Estimation (GAE).
@@ -547,17 +547,18 @@ class A2CAgent(BaseAgent):
             rewards_t (torch.Tensor): list of rewards for each state-action pair.
             dones_t (torch.Tensor): list of done flags for each state-action pair.
             Vs (torch.Tensor): list of state values for each state.
-            N (int): number of steps in the trajectory.
+            T (int): number of steps in the trajectory.
         Returns:
             advantages (torch.Tensor): list of advantages for each state-action pair.
             targets (torch.Tensor): list of target values for each state-action pair.
         """
         with torch.no_grad():
             # gaes = advantages
-            gaes = torch.zeros_like(rewards_t, device=self.device)
-            future_gae = torch.tensor(0.0, dtype=rewards_t.dtype, device=self.device)
+            gaes = torch.zeros(T, self.num_envs, device=self.device)
+            future_gae = torch.zeros(self.num_envs, device=self.device)
 
-            for t in reversed(range(N)):
+            # if N > T, use T steps
+            for t in reversed(range(T)):
                 # TD error: δ_t = r_t + γ*V(s_{t+1}) - V(s_t)
                 delta = rewards_t[t] + self.gamma * \
                     Vs[t + 1] * (1 - dones_t[t]) - Vs[t]
@@ -580,16 +581,16 @@ class A2CAgent(BaseAgent):
             states (list of np.array): list of states for each state-action pair.
             dones (list of bool): list of done flags for each state-action pair.
         """
-        N = len(rewards)
+        T = len(rewards)
         states_t = torch.FloatTensor(states).to(self.device)
         rewards_t = torch.FloatTensor(rewards).to(self.device)
         dones_t = torch.FloatTensor(dones).to(self.device)
 
         # Ensure the correct shapes
-        assert len(states_t) == N + 1
-        assert len(rewards_t) == N
-        assert len(dones_t) == N
-        assert len(log_probs) == N
+        assert len(states_t) == T + 1
+        assert len(rewards_t) == T
+        assert len(dones_t) == T
+        assert len(log_probs) == T
         
         # Compute all state values at once
         Vs = self.critic(states_t).squeeze()
@@ -597,7 +598,7 @@ class A2CAgent(BaseAgent):
         # Compute advantages and targets
         # pass Vs without gradient information
         advantages, targets = self.approx_func(
-            rewards_t, dones_t, Vs, N
+            rewards_t, dones_t, Vs, T
         )
         
         # Update critic to minimize TD error        
