@@ -468,14 +468,14 @@ class A2CAgent(BaseAgent):
         assert len(log_probs) == T
         
         # Compute all state values at once
-        Vs = self.critic(states_t).squeeze(-1)
+        Vs = self.critic(states_t).view(T + 1, self.env.num_envs)
 
         # Compute advantages and targets
         # pass Vs without gradient information
         advantages, targets = self.approx_func(
             rewards_t, dones_t, Vs, T
         )
-        
+
         # Update critic to minimize TD error        
         critic_loss = self.criterion(Vs[:-1], targets)
         self.critic_opt.zero_grad()
@@ -552,8 +552,7 @@ class A2CAgent(BaseAgent):
                 total += reward
                 state = next_state
 
-                if (ep + 1) % self.render_int == 0 and self.display:
-                    env.render()
+                self.env.render(ep)
 
                 if done or trunc:
                     break
