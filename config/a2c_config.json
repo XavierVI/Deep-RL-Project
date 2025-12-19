@@ -19,6 +19,8 @@
     "lambda": 0.95,
     "n_steps": 5,
 
-    "use_entropy_reg": true,
-    "beta": 0.01
+    "exp_strat": "entropy_reg",
+    "beta": 0.1,
+    "min_beta": 0.01,
+    "entropy_decay": 0.99
 }

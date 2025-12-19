@@ -144,7 +144,7 @@ if __name__ == "__main__":
     )
 
     parser.add_argument(
-        "--config_file_name", type=str, default="global_config.json",
+        "--config", type=str, default="global_config.json",
         help="Name of the configuration file in the config directory."
     )
 
@@ -153,4 +153,4 @@ if __name__ == "__main__":
     if args.parallel:
         parallel_main(args.num_processes)
     else:
-        main(args.config_file_name)
+        main(args.config)

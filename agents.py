@@ -335,7 +335,7 @@ class A2CAgent(BaseAgent):
     def __init__(self, cfg):
         super().__init__(cfg)
 
-        if self.action_space_type == "continuous":
+        if self.env.action_space_type == "continuous":
             self.actor = ContinuousPolicyNet(
                 self.state_dim,
                 self.action_dim,
@@ -379,36 +379,6 @@ class A2CAgent(BaseAgent):
     def _get_agent_prefix(self):
         return "a2c"
 
-
-    def select_action(self, state: np.array):
-        """Sample action from actor network."""
-        state_t = torch.FloatTensor(state).unsqueeze(0).to(self.device)
-
-        if self.action_space_type == "continuous":
-            mean, log_std = self.actor(state_t)
-            mean = mean.squeeze()
-            log_std = log_std.squeeze()
-            std = torch.exp(log_std)
-            
-            dist = torch.distributions.Normal(mean, std)
-            action_t = dist.sample()
-            action_t = torch.clamp(action_t, -1, 1)
-            log_prob = dist.log_prob(action_t).sum()
-            entropy = dist.entropy().sum()
-            
-            return action_t.cpu().numpy(), log_prob, entropy
-        
-        else:  # Discrete
-            _, probs_t = self.actor(state_t)
-            
-            dist = torch.distributions.Categorical(probs=probs_t)
-            action = dist.sample()
-            log_prob = dist.log_prob(torch.tensor(action, device=self.device))
-            entropy = dist.entropy()
-            
-            return action.cpu().numpy(), log_prob, entropy
-
-
     def N_step_return(self, rewards_t, dones_t, Vs, T):
         """
         Computes the advantages and target values using the
@@ -426,7 +396,7 @@ class A2CAgent(BaseAgent):
             targets (torch.Tensor): list of target values for each state-action pair.
         """
         with torch.no_grad():
-            rets = torch.zeros(T, self.num_envs, device=self.device)
+            rets = torch.zeros(T, self.env.num_envs, device=self.device)
             future_ret = Vs[-1] * (1 - dones_t[-1])
 
             for t in reversed(range(min(self.N, T))):
@@ -459,8 +429,8 @@ class A2CAgent(BaseAgent):
         """
         with torch.no_grad():
             # gaes = advantages
-            gaes = torch.zeros(T, self.num_envs, device=self.device)
-            future_gae = torch.zeros(self.num_envs, device=self.device)
+            gaes = torch.zeros(T, self.env.num_envs, device=self.device)
+            future_gae = torch.zeros(self.env.num_envs, device=self.device)
 
             # if N > T, use T steps
             for t in reversed(range(T)):
@@ -515,17 +485,49 @@ class A2CAgent(BaseAgent):
         # Update actor to maximize expected advantage
         actor_loss = -(torch.stack(log_probs) * advantages.detach()).mean()
 
-        if self.use_entropy_regularization:
+        if self.exp_strat.get_strategy() == "entropy_reg":
             # Add entropy regularization term
+            beta = self.exp_strat.get_exploration_param()
             entropies_t = torch.stack(entropies).to(self.device)
-            actor_loss += -self.beta * entropies_t.mean()
+            actor_loss += -beta * entropies_t.mean()
         self.actor_opt.zero_grad()
         actor_loss.backward()
         self.actor_opt.step()
 
+    def select_action(self, state: np.array):
+        """Sample action from actor network."""
+        if self.env.num_envs == 1:
+            state_t = torch.FloatTensor(state).unsqueeze(0).to(self.device)
+        else:
+            state_t = torch.FloatTensor(state).to(self.device)
+
+        if self.env.action_space_type == "continuous":
+            mean, log_std = self.actor(state_t)
+            mean = mean.squeeze()
+            log_std = log_std.squeeze()
+            std = torch.exp(log_std)
+
+            dist = torch.distributions.Normal(mean, std)
+            action_t = dist.sample()
+            action_t = torch.clamp(action_t, -1, 1)
+            log_prob_t = dist.log_prob(action_t).sum(dim=-1)
+            entropy_t = dist.entropy().sum(dim=-1)
+
+        else:  # Discrete
+            # here, we only need the probabilities
+            _, probs_t = self.actor(state_t)
+
+            dist = torch.distributions.Categorical(probs=probs_t)
+            action_t = dist.sample()
+            log_prob_t = dist.log_prob(action_t).sum(dim=-1)
+            entropy_t = dist.entropy().sum(dim=-1)
+
+        # we need to save the log prob and entropy grads
+        # for the update step
+        return action_t.cpu().numpy(), log_prob_t, entropy_t
+
     def train(self):
-        print(
-            f"Starting training for A2C...")
+        print(f"Starting training for A2C...")
         rewards_all = []
 
         for ep in range(self.num_episodes):
@@ -538,11 +540,11 @@ class A2CAgent(BaseAgent):
             states.append(state)
             
             for t in range(self.max_steps):
-                action, log_prob, entropy = self.select_action(state)
-                next_state, reward, done, trunc, _ = env.step(action)
+                actions, log_probs_t, entropies_t = self.select_action(state)
+                next_state, reward, done, trunc, _ = env.step(actions)
 
-                log_probs.append(log_prob)
-                entropies.append(entropy)
+                log_probs.append(log_probs_t)
+                entropies.append(entropies_t)
                 rewards.append(reward)
                 states.append(next_state)
                 dones.append(done or trunc)
@@ -565,91 +567,6 @@ class A2CAgent(BaseAgent):
             self.print_progress(ep, total, rewards_all)
 
         return rewards_all
-
-
-    def train_parallel(self):
-        """Train using synchronous vectorized environments.
-
-        Collects `N`-step rollouts for each parallel environment, concatenates
-        per-environment trajectories (so each env's transitions are contiguous),
-        and calls `update()` with the flattened lists.
-        Falls back to `train()` if not running with multiple envs.
-        """
-        # Fallback to regular train if not vectorized
-        if getattr(self, "num_envs", 1) <= 1:
-            return self.train()
-
-        env = self.env
-        rewards_all = []
-
-        rollout_len = min(self.N, self.max_steps)
-
-        for ep in range(self.num_episodes):
-            # reset returns (obs, info) for gymnasium
-            obs, _ = env.reset()
-            # obs shape: (num_envs, state_dim)
-
-            # Per-env buffers
-            num_envs = self.num_envs
-            states_bufs = [[obs[i]] for i in range(num_envs)]
-            rewards_bufs = [[] for _ in range(num_envs)]
-            dones_bufs = [[] for _ in range(num_envs)]
-            logp_bufs = [[] for _ in range(num_envs)]
-            ent_bufs = [[] for _ in range(num_envs)]
-            total_rewards = np.zeros(num_envs, dtype=float)
-
-            # Collect rollout_len steps
-            for t in range(rollout_len):
-                # select actions for each env (do not vectorize actor here)
-                actions = []
-                for i in range(num_envs):
-                    a, lp, ent = self.select_action(states_bufs[i][-1])
-                    actions.append(a)
-                    logp_bufs[i].append(lp)
-                    ent_bufs[i].append(ent)
-
-                # prepare action array for vector env
-                if self.action_space_type == "continuous":
-                    actions_arr = np.stack(actions)
-                else:
-                    actions_arr = np.array(actions)
-
-                next_obs, rewards, terminations, truncations, infos = env.step(actions_arr)
-
-                for i in range(num_envs):
-                    rewards_bufs[i].append(rewards[i])
-                    dones_bufs[i].append(bool(terminations[i] or truncations[i]))
-                    states_bufs[i].append(next_obs[i])
-                    total_rewards[i] += rewards[i]
-
-            # Flatten per-env buffers into global lists with env-major ordering
-            flat_states = []
-            flat_rewards = []
-            flat_dones = []
-            flat_logp = []
-            flat_ent = []
-
-            for i in range(num_envs):
-                # each states_bufs[i] is length rollout_len+1
-                flat_states.extend(states_bufs[i])
-                flat_rewards.extend(rewards_bufs[i])
-                flat_dones.extend(dones_bufs[i])
-                flat_logp.extend(logp_bufs[i])
-                flat_ent.extend(ent_bufs[i])
-
-            # convert states to numpy array shape (N_total+1, state_dim)
-            flat_states = np.array(flat_states)
-
-            # call update with flattened sequences
-            self.update(flat_logp, flat_ent, flat_rewards, flat_states, flat_dones)
-
-            # record mean reward across envs for this rollout
-            avg_total = float(np.mean(total_rewards))
-            rewards_all.append(avg_total)
-            self.print_progress(ep, avg_total, rewards_all)
-
-        return rewards_all
-
 
 class PPOAgent(BaseAgent):
     def __init__(self, cfg):
