@@ -15,6 +15,15 @@ class ExplorationStrategy:
         except KeyError:
             raise ValueError("exp_strat not specified in config. Please specify 'epsilon', 'boltzmann', or 'entropy_reg'.")
 
+        if self.exp_strat == "epsilon":
+            self._setup_epsilon_params(cfg)
+        elif self.exp_strat == "boltzmann":
+            self._setup_boltzmann_params(cfg)
+        elif self.exp_strat == "entropy_reg":
+            self._setup_entropy_params(cfg)
+        else:
+            raise ValueError("Invalid exp_strat specified. Choose 'epsilon', 'boltzmann', or 'entropy_reg'.")
+
 
     def _setup_epsilon_params(self, cfg):
         try:

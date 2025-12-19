@@ -30,6 +30,7 @@ class EnvironmentManager:
             )
             self.display = cfg.get("display", False)
             self.num_envs = 1
+            self.render_int = cfg.get("display_episodes", 100)
 
         try:
             self.action_space_type = cfg["action_space_type"]
@@ -66,3 +67,8 @@ class EnvironmentManager:
     def get_env(self, episode):
         """Get the appropriate environment (render or non-render) for the episode."""
         return self.render_env if self.display and (episode + 1) % self.render_int == 0 else self.env
+
+    def render(self, episode):
+        """Render the environment if display is enabled."""
+        if self.display and (episode + 1) % self.render_int == 0:
+            self.env.render()
