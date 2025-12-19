@@ -535,7 +535,7 @@ class A2CAgent(BaseAgent):
             state, _ = env.reset()
             log_probs, entropies = [], []
             rewards, states, dones = [], [], []
-            total = 0
+            total: float = 0.0
 
             states.append(state)
             
@@ -547,18 +547,25 @@ class A2CAgent(BaseAgent):
                 entropies.append(entropies_t)
                 rewards.append(reward)
                 states.append(next_state)
-                dones.append(done or trunc)
-            
-                total += reward
+                dones.append(np.array(done) | np.array(trunc))
+
                 state = next_state
 
                 self.env.render(ep)
 
-                if done or trunc:
-                    break
+                if self.env.num_envs == 1:
+                    total += reward
+                    if done or trunc:
+                        break
+                else:
+                    total += np.mean(reward)
+                    if any(done) or any(trunc):
+                        break
 
             # convert to numpy array for better performance
             states = np.array(states)
+            rewards = np.array(rewards)
+            dones = np.array(dones)
             self.update(log_probs, entropies, rewards, states, dones)
             # TODO: Add entropy regularization call here
             # self.decay_exploration_param()

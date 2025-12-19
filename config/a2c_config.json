@@ -2,6 +2,8 @@
     "algorithm": "a2c",
     "seed": 42,
     "env_name": "BipedalWalker-v3",
+    "parallel_envs": true,
+    "num_envs": 4,
     "display": true,
     "display_episodes":100,
 
