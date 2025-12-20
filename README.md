@@ -1,5 +1,6 @@
 ### About
-...
+This repository is an extension of an assignment from a class. It implements multiple deep reinforcement learning algorithms, and measures their performance on Bipedal Walker.
+
 
 ### Global Config file and Training
 The entries
@@ -31,7 +32,7 @@ Setting the maximum number of time steps to 1000 did lead to really high rewards
 
 
 ### References
-1. [Lunar Lander Docs](https://gymnasium.farama.org/environments/box2d/lunar_lander/)
+1. [Gymnasium Docs](https://gymnasium.farama.org/)
 2. [Wikipedia: Moving Average]()
 3. [NumPy: ufunc.at (used for computing averages in plot.py)](https://numpy.org/devdocs//reference/generated/numpy.ufunc.at.html)
 4. [NumPy: Convolve](https://numpy.org/doc/stable/reference/generated/numpy.convolve.html)
