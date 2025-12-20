@@ -527,7 +527,7 @@ class A2CAgent(BaseAgent):
         # for the update step
         return action_t.cpu().numpy(), log_prob_t, entropy_t
 
-    def train(self):
+    def train(self, profiler=None):
         print(f"Starting training for A2C...")
         rewards_all = []
 

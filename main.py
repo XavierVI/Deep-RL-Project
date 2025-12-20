@@ -7,9 +7,63 @@ from copy import deepcopy
 import numpy as np
 import torch
 import torch.multiprocessing as mp
+import csv
 
 from agents import *
 
+
+def init_profiler(wait: int = 1, warmup: int = 1, active: int = 2):
+    """Create a PyTorch profiler to capture CPU and CUDA function runtimes.
+    
+    Uses a schedule to control when profiling starts and stops. Call prof.step()
+    after each training iteration to advance through the schedule.
+    
+    Args:
+        wait: Number of initial steps to skip before warmup
+        warmup: Number of warmup steps to skip profiling data
+        active: Number of steps to actively profile and record
+    
+    Returns:
+        torch.profiler.profile: A configured profiler context manager.
+    """
+    activities = [torch.profiler.ProfilerActivity.CPU]
+    if torch.cuda.is_available():
+        # Include CUDA kernel timing when CUDA is present
+        activities.append(torch.profiler.ProfilerActivity.CUDA)
+
+    schedule = torch.profiler.schedule(wait=wait, warmup=warmup, active=active)
+    
+    return torch.profiler.profile(
+        activities=activities,
+        schedule=schedule,
+        record_shapes=False,
+        profile_memory=False,
+        with_stack=False,
+        with_modules=False,
+    )
+
+
+def export_profiler_artifacts(prof, out_dir: str, run_name: str = "run"):
+    os.makedirs(out_dir, exist_ok=True)
+
+    averages = prof.key_averages()
+    output_path = os.path.join(out_dir, f"{run_name}_summary.csv")
+
+    with open(output_path, "w") as f:
+        # Header
+        f.write(
+            "name,count,cpu_time,device_time\n")
+
+        for entry in averages:
+            # Use stable properties; truncate name to max 10 chars
+            name = str(getattr(entry, "key", getattr(entry, "name", "")))[:10]
+            # units are reported in microseconds; convert to seconds for CSV
+            f.write(f'"{name}",' 
+                f"{entry.count},"
+                f"{entry.cpu_time / 1_000_000},"
+                f"{entry.device_time / 1_000_000}\n")
+
+    print(f"Successfully dumped profiler data to {output_path}")
 
 
 def save_rewards_to_csv(rewards, lr, gamma, use_boltzmann, file_name=None):
@@ -87,7 +141,7 @@ def parallel_main(processes=os.cpu_count()):
         pool.starmap(run_training, args)
 
 
-def main(config_file_name):
+def main(config_file_name, profile=False):
     """
     This will run the trainer with the hyperparameters from the JSON file.
     """
@@ -122,10 +176,20 @@ def main(config_file_name):
         "a2c": A2CAgent,
         # "QLearningAgent": QLearningAgent
     }
-    
-    agent_class = agent_class_map[cfg["algorithm"]]
-    trainer = agent_class(cfg)
-    rewards = trainer.train()
+
+    if profile:
+        run_name = config_file_name.replace('.json', '')
+        log_dir = f"./profiler/{run_name}"
+        os.makedirs(log_dir, exist_ok=True)
+        with init_profiler() as prof:
+            agent_class = agent_class_map[cfg["algorithm"]]
+            trainer = agent_class(cfg)
+            rewards = trainer.train(profiler=prof)
+        export_profiler_artifacts(prof, out_dir=log_dir, run_name=run_name)
+    else:
+        agent_class = agent_class_map[cfg["algorithm"]]
+        trainer = agent_class(cfg)
+        rewards = trainer.train()
     
     save_rewards_to_csv(
         rewards,
@@ -158,9 +222,15 @@ if __name__ == "__main__":
         help="Name of the configuration file in the config directory."
     )
 
+    # disabled because profiler doesn't work very well
+    # parser.add_argument(
+    #     "--profile", action="store_true",
+    #     help="Enable PyTorch profiler during training."
+    # )
+
     args = parser.parse_args()
 
     if args.parallel:
         parallel_main(args.num_processes)
     else:
-        main(args.config)
+        main(args.config, args.profile)

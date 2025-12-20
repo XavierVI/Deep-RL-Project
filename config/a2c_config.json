@@ -12,8 +12,8 @@
     "critic_hidden_layers": [256, 256],
     "activation_function": "relu",
 
-    "num_episodes": 10000000,
-    "max_steps": 1600,
+    "num_episodes": 100,
+    "max_steps": 500,
     "learning_rate": 0.0007,
     "gamma": 0.99,
     
