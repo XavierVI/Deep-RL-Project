@@ -2,7 +2,9 @@ import os
 from random import choice
 from time import sleep
 
+import numpy as np
 import vizdoom as vzd
+from PIL import Image
 
 
 def init_doom(game: vzd.DoomGame):
@@ -13,6 +15,13 @@ def init_doom(game: vzd.DoomGame):
     game.init()
 
 
+def save_screen_buffer(screen_buf, frame_number: int):
+    # Transpose from (channels, height, width) to (height, width, channels) for PIL
+    screen_buf = np.transpose(screen_buf, (1, 2, 0))
+    img = Image.fromarray(screen_buf)
+    if not os.path.exists("screens"):
+        os.makedirs("screens")
+    img.save(f"screens/screen_{frame_number:04d}.png")
 
 def main():
     pass
@@ -30,7 +39,7 @@ if __name__ == "__main__":
 
     # Sets time that will pause the engine after each action (in seconds)
     # Without this everything would go too fast for you to keep track of what's happening.
-    sleep_time = 1.0 / vzd.DEFAULT_TICRATE  # = 0.028
+    sleep_time = 1.0
 
     for i in range(episodes):
         print(f"Episode #{i + 1}")
@@ -55,6 +64,22 @@ if __name__ == "__main__":
             labels_buf = state.labels_buffer
             automap_buf = state.automap_buffer
             audio_buf = state.audio_buffer
+
+            print("=" * 80)
+            print("*")
+            print("* Screen buffer size:", None if screen_buf is None else screen_buf.shape)
+            print("* Depth buffer size:", None if depth_buf is None else depth_buf.shape)
+            print("* Game var (Health):", vars[0])
+            print("* Game var (Ammo2):", vars[1])
+            print("* Game var (Position X):", vars[2])
+            print("* Game var (Position Y):", vars[3])
+            print("* Game var (Velocity X):", vars[4])
+            print("* Game var (Velocity Y):", vars[5])
+            print("=" * 80)
+
+            # Save the screen buffer to an image file
+            if screen_buf is not None:
+                save_screen_buffer(screen_buf, n)
 
             # List of labeled objects visible in the frame, may be None if not first enabled.
             labels = state.labels

@@ -5,3 +5,8 @@ pandas
 matplotlib
 gymnasium[box2d]
 pygame>=2.1.3
+pycocotools
+tqdm
+torchvision
+timm
+vizdoom

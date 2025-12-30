@@ -9,7 +9,7 @@ import torch
 import torch.multiprocessing as mp
 import csv
 
-from agents import *
+from reinforcement_learning.agents import *
 
 
 def init_profiler(wait: int = 1, warmup: int = 1, active: int = 2):

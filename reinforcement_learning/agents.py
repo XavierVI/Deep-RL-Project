@@ -6,9 +6,9 @@ import torch.nn.functional as F
 import torch.optim as optim
 from abc import ABC, abstractmethod
 
-from networks import *
-from EnvironmentManager import EnvironmentManager
-from Exploration import ExplorationStrategy
+from reinforcement_learning.networks import *
+from reinforcement_learning.EnvironmentManager import EnvironmentManager
+from reinforcement_learning.Exploration import ExplorationStrategy
 
 # --------------------------------------------------------------- #
 #                     Base Agent Class Definition                 #
@@ -584,6 +584,24 @@ class PPOAgent(BaseAgent):
     
     def _get_agent_prefix(self):
         return "ppo"
+    
+    def select_action(self, state):
+        pass
+
+    def update(self, trajectories):
+        pass
+    
+    def train(self):
+        pass
+
+
+
+class DoomAgent(BaseAgent):
+    def __init__(self, cfg):
+        super().__init__(cfg)
+    
+    def _get_agent_prefix(self):
+        return "doom_agent"
     
     def select_action(self, state):
         pass
