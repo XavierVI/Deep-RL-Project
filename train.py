@@ -8,7 +8,7 @@ import torch
 from torch.utils.data import DataLoader
 from torch.optim import AdamW
 from transformers import AutoImageProcessor, AutoModelForObjectDetection
-from Vision.datasets import CocoDoomDataset
+from Vision.datasets import *
 from Vision.Trainer import Trainer
 import pycocotools
 from pycocotools.coco import COCO
@@ -41,13 +41,13 @@ def create_datasets(processor):
         annotation_file_name=val_annotation_file,
         processor=processor
     )
-    test_dataset = CocoDoomDataset(
-        data_dir=coco_doom_dataset_path,
-        annotation_file_name=test_annotation_file,
-        processor=processor
-    )
+    # test_dataset = CocoDoomDataset(
+    #     data_dir=coco_doom_dataset_path,
+    #     annotation_file_name=test_annotation_file,
+    #     processor=processor
+    # )
 
-    return train_dataset, val_dataset, test_dataset
+    return train_dataset, val_dataset
 
 
 def main():
@@ -68,14 +68,23 @@ def main():
         "facebook/detr-resnet-50")
 
     # Create datasets and dataloaders
-    train_dataset, val_dataset, test_dataset = create_datasets(processor)
+    train_dataset, val_dataset = create_datasets(processor)
+
+    lru_cache_dataset = DiskCachedDataset(
+        train_dataset,
+        cache_dir=os.path.join(
+            os.pardir, "datasets", "cocodoom", "preprocessed"
+        ),
+        max_cache_items=5000
+    )
 
     train_dataloader = DataLoader(
-        train_dataset,
+        lru_cache_dataset,
         batch_size=batch_size,
         shuffle=True,
         num_workers=workers,
         pin_memory=True,
+        persistent_workers=True,
         collate_fn=detr_collate_fn
     )
     val_dataloader = DataLoader(
@@ -84,6 +93,7 @@ def main():
         shuffle=True,
         num_workers=workers,
         pin_memory=True,
+        persistent_workers=True,
         collate_fn=detr_collate_fn
     )
 

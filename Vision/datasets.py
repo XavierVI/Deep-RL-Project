@@ -4,15 +4,18 @@ from torch.utils.data import Dataset
 import torchvision
 from pycocotools.coco import COCO
 from PIL import Image
-
+from pathlib import Path
+from collections import OrderedDict
+import threading
 
 class CocoDoomDataset(torchvision.datasets.CocoDetection):
     """
     Custom COCO dataset for training a DETR model.
     """
-
-    def __init__(self, data_dir, annotation_file_name, 
-        processor):
+    def __init__(
+        self, data_dir, annotation_file_name, 
+        processor
+    ):
         """
         Args:
             data_dir: Path to dataset
@@ -103,3 +106,71 @@ class CocoDoomDataset(torchvision.datasets.CocoDetection):
         img_info = self.coco.loadImgs(img_id)[0]
         target = {'image_id': img_id, 'annotations': target}
         return img, target, img_info["file_name"]
+
+
+class LRUCachedDataset(Dataset):
+    def __init__(self, dataset, max_cache_items=100):
+        self.dataset = dataset
+        self.cache = OrderedDict()
+        self.max_cache_items = max_cache_items
+
+    def __len__(self):
+        return len(self.dataset)
+
+    def __getitem__(self, idx):
+        if idx in self.cache:
+            # Move to end (most recently used)
+            self.cache.move_to_end(idx)
+            return self.cache[idx]
+
+        item = self.dataset[idx]
+
+        # Add to cache
+        self.cache[idx] = item
+        if len(self.cache) > self.max_cache_items:
+            # Remove oldest item
+            self.cache.popitem(last=False)
+
+        return item
+
+
+class DiskCachedDataset(Dataset):
+    def __init__(self, dataset, cache_dir, max_cache_items=100):
+        self.dataset = dataset
+        self.cache_dir = Path(cache_dir)
+        self.cache_dir.mkdir(exist_ok=True)
+        self.max_cache_items = max_cache_items
+        self.cached_items = 0
+        self._cache_lock = threading.Lock()
+
+    def __len__(self):
+        return len(self.dataset)
+
+    def __getitem__(self, idx):
+        cache_file = self.cache_dir / f"{idx}.pt"
+
+        if cache_file.exists():
+            item = torch.load(cache_file, weights_only=True)
+            return item['pixel_values'], item['labels']
+
+        pixel_values, labels = self.dataset[idx]
+        self._cache_item(idx, pixel_values, labels)
+        return pixel_values, labels
+
+    def _cache_item(self, idx, pixel_values, labels):
+        with self._cache_lock:
+            cache_file = self.cache_dir / f"{idx}.pt"
+
+            if not cache_file.exists():
+                data_to_cache = {
+                    'pixel_values': pixel_values,
+                    'labels': labels
+                }
+                torch.save(data_to_cache, cache_file)
+                self.cached_items += 1
+            
+            if self.cached_items > self.max_cache_items:
+                # Remove first item
+                first_cache_file = os.listdir(self.cache_dir)[0]
+                os.remove(self.cache_dir / first_cache_file)
+                self.cached_items -= 1

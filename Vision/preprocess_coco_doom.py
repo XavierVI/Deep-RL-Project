@@ -58,9 +58,6 @@ def preprocess_and_save_dataset(dataset, split_name):
         target['area'] = None  # remove area to save space
         target['iscrowd'] = None  # remove iscrowd to save space
 
-        print(f"Pixel values shape: {pixel_values.shape}")
-        print(f"Target: {target}")
-
         # modify file name to have .pt extension
         pt_file_name = os.path.splitext(img_file_name)[0] + ".pt"
         save_path = os.path.join(save_root, pt_file_name)
