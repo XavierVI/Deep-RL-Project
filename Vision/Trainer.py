@@ -70,7 +70,7 @@ class Trainer:
                 print(f"Saved checkpoint: {checkpoint_path}")
 
 
-    def validate(model, dataloader, device):
+    def validate(self, model, dataloader, device):
         """Validate the model."""
         model.eval()
         total_loss = 0
@@ -87,3 +87,7 @@ class Trainer:
 
         avg_loss = total_loss / len(dataloader)
         return avg_loss
+
+    def reset_losses(self):
+        self.train_losses = []
+        self.val_losses = []

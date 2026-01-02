@@ -3,10 +3,9 @@ import torch
 from torch.utils.data import Dataset
 import torchvision
 from pycocotools.coco import COCO
-from PIL import Image
 from pathlib import Path
 from collections import OrderedDict
-import threading
+
 
 class CocoDoomDataset(torchvision.datasets.CocoDetection):
     """
@@ -30,44 +29,34 @@ class CocoDoomDataset(torchvision.datasets.CocoDetection):
         self.img_folder = data_dir
         self.coco = COCO(annotation_file)
         self.processor = processor
-        self.id2label = self.coco.loadCats(self.coco.getCatIds())
-        # Map COCO category ids (which may be non-contiguous) to contiguous 0-based ids
-        # expected by DETR's classification head.
-        self.cat_id_to_contiguous_id = {
-            cat_id: idx for idx, cat_id in enumerate(self.coco.getCatIds())
+        cat_list = self.coco.loadCats(self.coco.getCatIds())
+
+        # create contiguous category id mapping to handle
+        # inconsistent category ids in CocoDoom
+        sorted_cats = sorted(cat_list, key=lambda x: x['id'])
+        self.coco_id_to_contiguous = {
+            cat['id']: idx for idx, cat in enumerate(sorted_cats)
         }
-        self.ids = list(sorted(self.coco.imgs.keys()))
-        
-        # Remap all annotations once during initialization to avoid doing it every __getitem__
-        for ann_id, ann in self.coco.anns.items():
-            ann['category_id'] = self.cat_id_to_contiguous_id[ann['category_id']]
-            
+        # remap ids to contiguous ids
+        self.id2cat = {
+            idx: cat['name'] for idx, cat 
+            in enumerate(sorted_cats)
+        }
+        self.cat2id = {
+            cat['name']: idx for idx, cat
+            in enumerate(sorted_cats)
+        }
+        self.num_categories = len(self.id2cat)
+
+        # identifier for each image in dataset
+        self.img_ids = list(self.coco.imgs.keys())      
 
         print(f"Loaded {annotation_file_name}")
         print(f"Number of images: {len(self.coco.imgs)}")
         print(f"Number of Categories: {len(self.coco.getCatIds())}")
 
     def __len__(self):
-        return len(self.ids)
-
-    # def get_preprocessed_item(self, idx):
-    def fast__getitem__(self, idx):
-        """
-        Get a single preprocessed image and target.
-        
-        Uses preprocessed data from disk.
-        """
-        img_id = self.ids[idx]
-        img_info = self.coco.loadImgs(img_id)[0]
-        img_path = os.path.join(
-            self.img_folder, "preprocessed", img_info['file_name'])
-        img_path = img_path.replace('.png', '.pt')
-                
-        data = torch.load(img_path, weights_only=True)
-        pixel_values = data['pixel_values']
-        target = data['labels']
-        
-        return pixel_values, target
+        return len(self.img_ids)
 
     def __getitem__(self, idx):
         """
@@ -76,7 +65,12 @@ class CocoDoomDataset(torchvision.datasets.CocoDetection):
         Uses the processor.
         """
         img, target = super(CocoDoomDataset, self).__getitem__(idx)
-        img_id = self.ids[idx]
+        img_id = self.img_ids[idx]
+
+        # remap category IDs from image to consistent format
+        for ann in target:
+            original_id = ann['category_id']
+            ann['category_id'] = self.coco_id_to_contiguous[original_id]
 
         target = {'image_id': img_id, 'annotations': target}
 
@@ -88,7 +82,7 @@ class CocoDoomDataset(torchvision.datasets.CocoDetection):
         )
         
         # squeeze and [0] to remove batch dimension
-        pixel_values = encoding["pixel_values"].squeeze()
+        pixel_values = encoding["pixel_values"].squeeze(0)
         target = encoding["labels"][0]
 
         return pixel_values, target
@@ -101,16 +95,23 @@ class CocoDoomDataset(torchvision.datasets.CocoDetection):
         # For DETR models, we can use this line of code to
         # obtain appropriate structure for the annotations
         img, target = super(CocoDoomDataset, self).__getitem__(idx)
-        img_id = self.ids[idx]
+        img_id = self.img_ids[idx]
         img_info = self.coco.loadImgs(img_id)[0]
-        remapped_annotations = []
-        for ann in target:
-            ann_copy = ann.copy()
-            ann_copy['category_id'] = self.cat_id_to_contiguous_id[ann['category_id']]
-            remapped_annotations.append(ann_copy)
 
-        target = {'image_id': img_id, 'annotations': remapped_annotations}
+        target = {'image_id': img_id, 'annotations': target}
         return img, target, img_info["file_name"]
+
+
+    def get_img_info(self, idx):
+        """
+        Returns the image ID and path
+        """
+        img_id = self.img_ids[idx]
+        img_info = self.coco.loadImgs(img_id)[0]
+        img_path = os.path.join(
+            self.img_folder, "preprocessed", img_info['file_name'])
+
+        return img_id, img_path
 
 
 class CachedDataset(Dataset):
@@ -164,11 +165,10 @@ class LRUCachedDataset(Dataset):
         return item
 
 
-class DiskCachedDataset(Dataset):
+class PreprocessedDataset(Dataset):
     """
-    This dataset will load preprocessed items from disk.
-    Assumes that the dataset has been preprocessed and saved to disk
-    at 'cache_dir'.
+    This dataset is a wrapper around CocoDoomDataset that
+    returns preprocessed images from disk, if they exist.
     """
     def __init__(self, dataset, cache_dir):
         self.dataset = dataset
@@ -178,7 +178,8 @@ class DiskCachedDataset(Dataset):
         return len(self.dataset)
 
     def __getitem__(self, idx):
-        cache_file = self.cache_dir / f"{idx}.pt"
+        img_id, img_path = self.dataset.get_img_info(idx)
+        cache_file = self.cache_dir / (Path(img_path).stem + ".pt")
 
         if cache_file.exists():
             item = torch.load(cache_file, weights_only=True)

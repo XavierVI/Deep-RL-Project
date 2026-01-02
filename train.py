@@ -7,12 +7,13 @@ import os
 import torch
 from torch.utils.data import DataLoader
 from torch.optim import AdamW
-from transformers import AutoImageProcessor, AutoModelForObjectDetection
-from transformers import RTDetrForObjectDetection, RTDetrImageProcessor
+# facebook/detr
+from transformers import DetrImageProcessorFast, AutoModelForObjectDetection
+# rt-detr
+from transformers import RTDetrForObjectDetection, RTDetrImageProcessorFast
 from Vision.datasets import *
 from Vision.Trainer import Trainer
 from pycocotools.coco import COCO
-from transformers import DetrImageProcessorFast
 from ultralytics import YOLO
 
 
@@ -54,26 +55,27 @@ def create_datasets(processor):
 
 
 def train_detr_model(device):
-    optimizer_lr = 1e-5
+    optimizer_lr = 1e-3
     weight_decay = 1e-4
     batch_size = 16
     num_epochs = 10
-    workers = 8
+    workers = 16
+    # model_str = "PekingU/rtdetr_r18vd"
+    model_str = "facebook/detr-resnet-50"
+
     # Load processor
-    processor = RTDetrImageProcessor.from_pretrained(
-        "PekingU/rtdetr_r18vd",
-        use_fast=True    
+    processor = DetrImageProcessorFast.from_pretrained(
+        model_str,
+        size={"shortest_edge": 200, "longest_edge": 320},
+        # do_resize=True,
+        # size={"max_height": 640, "max_width": 640},
+        # do_pad=True,
+        # pad_size={"height": 640, "width": 640},
+        use_fast=True
     )
 
     # Create datasets and dataloaders
     train_dataset, val_dataset = create_datasets(processor)
-
-    # cache_dataset = DiskCachedDataset(
-    #     train_dataset,
-    #     cache_dir=os.path.join(
-    #         os.pardir, "datasets", "cocodoom", "preprocessed"
-    #     )
-    # )
 
     train_dataloader = DataLoader(
         train_dataset,
@@ -95,14 +97,12 @@ def train_detr_model(device):
     )
 
     # Load the model
-    model = RTDetrForObjectDetection.from_pretrained(
-        "PekingU/rtdetr_r18vd",
+    model = AutoModelForObjectDetection.from_pretrained(
+        model_str,
         ignore_mismatched_sizes=True,
-        num_labels=len(train_dataset.coco.getCatIds()),
-        id2label={i: cat['name']
-                  for i, cat in enumerate(train_dataset.id2label)},
-        label2id={cat['name']: i for i,
-                  cat in enumerate(train_dataset.id2label)}
+        num_labels=train_dataset.num_categories,
+        id2label=train_dataset.id2cat,
+        label2id=train_dataset.cat2id
     ).to(device)
 
     # Create optimizer

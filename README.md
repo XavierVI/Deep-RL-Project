@@ -7,8 +7,8 @@ The goal of this project was to practice fundamentals in machine learning. Speci
 This project requires the packages in `requirements.txt`.
 
 
-# Training DETR-RESNET-50
-
+# Notes on Training DETR Models
+The CocoDoom dataset originally defines 94, non-contiguous category IDs. However, some images have category IDs outside of this range.
 
 
 

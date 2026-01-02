@@ -11,7 +11,10 @@ sys.path.append(os.path.join(os.pardir))
 
 
 # create preprocessor
-processor = DetrImageProcessor.from_pretrained("facebook/detr-resnet-50")
+processor = DetrImageProcessor.from_pretrained(
+    "facebook/detr-resnet-50",
+    size={"shortest_edge": 200, "longest_edge": 320}
+)
 
 # create dataset instance
 train_dataset = CocoDoomDataset(
@@ -51,12 +54,12 @@ def preprocess_and_save_dataset(dataset, split_name):
         target = dict(encoding['labels'][0])
 
         # reduce format of target tensors
-        target['boxes'] = target['boxes'].to(torch.float16)
-        target['size'] = None
-        # we only have 94 categories
-        target['class_labels'] = target['class_labels'].to(torch.int16)
-        target['area'] = None  # remove area to save space
-        target['iscrowd'] = None  # remove iscrowd to save space
+        # target['boxes'] = target['boxes'].to(torch.float16)
+        # target['size'] = None
+        # # we only have 94 categories
+        # target['class_labels'] = target['class_labels'].to(torch.int16)
+        # target['area'] = None  # remove area to save space
+        # target['iscrowd'] = None  # remove iscrowd to save space
 
         # modify file name to have .pt extension
         pt_file_name = os.path.splitext(img_file_name)[0] + ".pt"
