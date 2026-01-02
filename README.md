@@ -8,7 +8,9 @@ This project requires the packages in `requirements.txt`.
 
 
 # Notes on Training DETR Models
-The CocoDoom dataset originally defines 94, non-contiguous category IDs. However, some images have category IDs outside of this range.
+The CocoDoom dataset originally defines 94, non-contiguous category IDs. However, some images have category IDs outside of the indices in the annotations. To handle this, the dataset uses a mapping from the original IDs to a contiguous set of indices. This seems to work, but there may be a better approach.
+
+I chose to train a detr-resnet-50 model because it displayed the best performance, and was the easiest model to train on this dataset. It was difficult to get the YOLO models to handle the dataset inconsistencies, and the real time detr models were too slow in training. Mostly because they required the images to be upscaled.
 
 
 
