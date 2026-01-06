@@ -458,9 +458,14 @@ class PPOAgent(A2CAgent):
         # override advantage function to always use GAE
         self.approx_func = self.gae
 
+        if self.exp_strat.get_strategy() != "entropy_reg":
+            self.beta = 0.0
+        # otherwise, beta was defined
+
         # Criterion
         self.criterion = nn.MSELoss(reduction='mean')
         self.minibatch_size = cfg.get("ppo_minibatch_size", 64)
+        self.ppo_epochs = cfg.get("ppo_epochs", 10)
     
     def _get_agent_prefix(self):
         return "ppo"
@@ -468,71 +473,28 @@ class PPOAgent(A2CAgent):
     def select_action(self, state):
         pass
 
-    def _update_actor(self, log_probs, advantages, entropies):
+    def _update_actor(self, states_t, old_log_probs_t, advantages_t, entropies_t):
         """
         PPO-specific actor update using clipped surrogate objective.
         """
+        # Compute new log probabilities
+        new_log_probs_t = self.actor(states_t)
 
-        
-    
-    def update(self, old_log_probs, entropies, rewards, states, dones):
-        """
-        Update both the actor and the critic networks.
+        # compute ratios for each timestep
+        ratios = torch.exp(new_log_probs_t - old_log_probs_t)
+        clipped_ratios = torch.clamp(
+            ratios, 1 - self.clip_epsilon, 1 + self.clip_epsilon)
 
-        Args:
-            old_log_probs (list of torch.Tensor): list of log probabilities for each action.
-            rewards (list of float): list of rewards for each state-action pair.
-            states (list of np.array): list of states for each state-action pair.
-            dones (list of bool): list of done flags for each state-action pair.
-        """
-        T = len(rewards)
-        states_t = torch.FloatTensor(states).to(self.device)
-        rewards_t = torch.FloatTensor(rewards).to(self.device)
-        old_log_probs_t = torch.FloatTensor(old_log_probs).to(self.device)
-        dones_t = torch.FloatTensor(dones).to(self.device)
+        # compute surrogate losses
+        actor_loss = -torch.min(
+            ratios * advantages_t,
+            clipped_ratios * advantages_t
+        ).mean() - self.beta * entropies_t.mean()
 
-        # Ensure the correct shapes
-        assert len(states_t) == T + 1
-        assert len(rewards_t) == T
-        assert len(dones_t) == T
-        assert len(old_log_probs_t) == T
+        self.actor_opt.zero_grad()
+        actor_loss.backward()
+        self.actor_opt.step()
 
-        # Compute all state values at once
-        Vs = self.critic(states_t).view(T + 1, self.env.num_envs)
-
-        # Compute advantages and targets
-        # pass Vs without gradient information
-        advantages, targets = self.compute_advantages(rewards_t, dones_t, Vs, T)
-
-        # Update critic to minimize TD error (stays the same as A2C)
-        self._update_critic(Vs, targets)
-
-        # convert data to TensorDataset for minibatch sampling
-        dataset = torch.utils.data.TensorDataset(
-            states_t,
-            torch.stack(old_log_probs_t),
-            advantages,
-        )
-        dataloader = torch.utils.data.DataLoader(
-            dataset,
-            batch_size=self.minibatch_size,
-            shuffle=True
-        )
-
-        for (states, old_log_probs, advs) in dataloader:
-            # Compute new log probabilities
-            new_log_probs = self.actor(states)
-            # Update actor to maximize expected advantage
-            actor_loss = -(torch.stack(log_probs) * advantages.detach()).mean()
-
-            if self.exp_strat.get_strategy() == "entropy_reg":
-                # Add entropy regularization term
-                beta = self.exp_strat.get_exploration_param()
-                entropies_t = torch.stack(entropies).to(self.device)
-                actor_loss += -beta * entropies_t.mean()
-            self.actor_opt.zero_grad()
-            actor_loss.backward()
-            self.actor_opt.step()
 
     def select_action(self, state: np.array):
         """Sample action from actor network."""
@@ -565,41 +527,74 @@ class PPOAgent(A2CAgent):
         return action_t.cpu().numpy(), log_prob_t, entropy_t
 
     def train(self):
-        print(f"Starting training for A2C...")
+        print(f"Starting training for {self._get_agent_prefix()}...")
         rewards_all = []
 
         for ep in range(self.num_episodes):
             env = self.env.get_env(ep)
             state, _ = env.reset()
-            rewards, states, dones = [], [], []
-            log_probs, entropies = [], []
+            rewards_np = np.zeros((self.max_steps, self.env.num_envs))
+            states_np = np.zeros((self.max_steps + 1, self.env.num_envs, *state.shape))
+            dones_np = np.zeros((self.max_steps, self.env.num_envs), dtype=bool)
+            log_probs_np = np.zeros((self.max_steps, self.env.num_envs))
+            entropies_np = np.zeros((self.max_steps, self.env.num_envs))
             total: float = 0.0
 
             # Trajectory collection phase
-            # collect rollout
+            states_np[0] = state
             for t in range(self.max_steps):
-                actions, log_probs_t, entropies_t = self.select_action(state)
+                actions, log_probs, entropies = self.select_action(state)
                 next_state, reward, done, trunc, _ = env.step(actions)
 
-                log_probs.append(log_probs_t)
-                entropies.append(entropies_t)
-                rewards.append(reward)
-                states.append(next_state)
-                dones.append(np.array(done) | np.array(trunc))
-
+                log_probs_np[t] = log_probs
+                entropies_np[t] = entropies
+                rewards_np[t] = reward
+                states_np[t + 1] = next_state
+                dones_np[t] = np.array(done) | np.array(trunc)
                 state = next_state
+                total += np.mean(reward)
+
+            states_t = torch.FloatTensor(states_np).to(self.device)
+            rewards_t = torch.FloatTensor(rewards_np).to(self.device)
+            log_probs_t = torch.FloatTensor(log_probs_np).to(self.device)
+            dones_t = torch.FloatTensor(dones_np).to(self.device)
+            entropies_t = torch.FloatTensor(entropies_np).to(self.device)
+
+            # Compute all state values at once
+            Vs = self.critic(states_t).view(
+                self.max_steps + 1, self.env.num_envs)
+
+            # Compute advantages and targets
+            # pass Vs without gradient information
+            advantages_t, targets_t = self.compute_advantages(
+                rewards_t, dones_t, Vs, self.max_steps)
+
+            # convert data to TensorDataset for minibatch sampling
+            dataset = torch.utils.data.TensorDataset(
+                states_t[:-1], # exclude state at T + 1
+                log_probs_t, advantages_t, targets_t,
+                entropies_t
+            )
+            dataloader = torch.utils.data.DataLoader(
+                dataset,
+                batch_size=self.minibatch_size,
+                shuffle=True
+            )
 
             # Update phase
+            for epoch in range(self.ppo_epochs):
+                for batch in dataloader:
+                    s, lp, adv, tar, ent = batch
 
+                    # Update actor using PPO clipped objective
+                    # generates gradients within the function itself
+                    self._update_actor(
+                        s, lp, adv, ent
+                    )
+                    # Update critic to minimize TD error (stays the same as A2C)
+                    batch_Vs = self.critic(s).view(-1) # generate gradients
+                    self._update_critic(batch_Vs, tar) # update
             
-
-            # convert to numpy array for better performance
-            states = np.array(states)
-            rewards = np.array(rewards)
-            dones = np.array(dones)
-            self.update(log_probs, entropies, rewards, states, dones)
-            # TODO: Add entropy regularization call here
-            # self.decay_exploration_param()
             rewards_all.append(total)
             self.print_progress(ep, total, rewards_all)
 

@@ -72,6 +72,6 @@ class ExplorationStrategy:
         elif self.exp_strat == "entropy_reg":
             return self.beta
 
-    def get_strategy(self):
+    def get_strategy(self) -> str:
         """Get the exploration strategy type."""
         return self.exp_strat
