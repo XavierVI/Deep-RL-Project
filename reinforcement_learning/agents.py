@@ -280,33 +280,7 @@ class A2CAgent(BaseAgent):
     def __init__(self, cfg):
         super().__init__(cfg)
 
-        if self.env.action_space_type == "continuous":
-            self.actor = ContinuousPolicyNet(
-                self.state_dim,
-                self.action_dim,
-                cfg["actor_hidden_layers"],
-                cfg["activation_function"]
-            ).to(self.device)
-        else:
-            self.actor = PolicyNet(
-                self.state_dim,
-                self.action_dim,
-                cfg["actor_hidden_layers"],
-                cfg["activation_function"]
-            ).to(self.device)
-
-        # critic is producing values (V(s)), so it only needs to produce one output value
-        self.critic = ValueNet(
-            self.state_dim,
-            1,
-            cfg["critic_hidden_layers"],
-            cfg["activation_function"]
-        ).to(self.device)
-
-        # Optimizers
-        self.actor_opt = optim.Adam(
-            self.actor.parameters(), lr=cfg["learning_rate"])
-        self.critic_opt = optim.Adam(self.critic.parameters(), lr=cfg["learning_rate"])
+        self._init_actor_critic(cfg)
         
         # Criterion
         self.criterion = nn.MSELoss(reduction='mean')
@@ -324,72 +298,42 @@ class A2CAgent(BaseAgent):
     def _get_agent_prefix(self):
         return "a2c"
 
-    def N_step_return(self, rewards_t, dones_t, Vs, T):
-        """
-        Computes the advantages and target values using the
-        N-step approximation for Q(s, a).
+    def _check_parameter_shapes(self, T, states_t, rewards_t, dones_t, log_probs_t):
+        """Ensure the correct shapes of the tensors."""
+        assert len(states_t) == T + 1
+        assert len(rewards_t) == T
+        assert len(dones_t) == T
+        assert len(log_probs_t) == T
 
-        All computations are done with no_grad() to avoid unnecessary gradient computation.
+    def _compute_advantages(self, rewards_t, dones_t, Vs, T):
+        # pass Vs without gradient information
+        advantages, targets = self.approx_func(
+            rewards_t, dones_t, Vs, T
+        )
 
-        Args:
-            rewards_t (torch.Tensor): list of rewards for each state-action pair.
-            dones_t (torch.Tensor): list of done flags for each state-action pair.
-            Vs (torch.Tensor): list of state values for each state.
-            T (int): number of steps in the trajectory.
-        Returns:
-            advantages (torch.Tensor): list of advantages for each state-action pair.
-            targets (torch.Tensor): list of target values for each state-action pair.
-        """
-        with torch.no_grad():
-            rets = torch.zeros(T, self.env.num_envs, device=self.device)
-            future_ret = Vs[-1] * (1 - dones_t[-1])
+        # normalize advantages
+        advantages = (advantages - advantages.mean()) / \
+            (advantages.std() + 1e-8)
 
-            for t in reversed(range(min(self.N, T))):
-                rets[t] = rewards_t[t] + self.gamma * \
-                    future_ret * (1 - dones_t[t])
-                future_ret = rets[t]
+        return advantages, targets
 
-            # Compute advantages: A(s,a) = Q(s,a) - V(s) ≈ Return - V(s)
-            advantages = rets - Vs
-            # set target values
-            targets = rets
+    def _update_critic(self, Vs, targets):
+        critic_loss = self.criterion(Vs[:-1], targets)
+        self.critic_opt.zero_grad()
+        critic_loss.backward()
+        self.critic_opt.step()
 
-            return advantages, targets
+    def _update_actor(self, log_probs, advantages, entropies):
+        actor_loss = -(torch.stack(log_probs) * advantages.detach()).mean()
 
-    def gae(self, rewards_t, dones_t, Vs, T):
-        """
-        This function computes the advantages and target values using the
-        Generalized Advantage Estimation (GAE).
-
-        All computations are done with no_grad() to avoid unnecessary gradient computation.
-        
-        Args:
-            rewards_t (torch.Tensor): list of rewards for each state-action pair.
-            dones_t (torch.Tensor): list of done flags for each state-action pair.
-            Vs (torch.Tensor): list of state values for each state.
-            T (int): number of steps in the trajectory.
-        Returns:
-            advantages (torch.Tensor): list of advantages for each state-action pair.
-            targets (torch.Tensor): list of target values for each state-action pair.
-        """
-        with torch.no_grad():
-            # gaes = advantages
-            gaes = torch.zeros(T, self.env.num_envs, device=self.device)
-            future_gae = torch.zeros(self.env.num_envs, device=self.device)
-
-            # if N > T, use T steps
-            for t in reversed(range(T)):
-                # TD error: δ_t = r_t + γ*V(s_{t+1}) - V(s_t)
-                delta = rewards_t[t] + self.gamma * \
-                    Vs[t + 1] * (1 - dones_t[t]) - Vs[t]
-
-                # GAE: A_t = δ_t + (γλ)*δ_{t+1} + (γλ)^2*δ_{t+2} + ...
-                gaes[t] = delta + self.gamma * self.lambda_ * (1 - dones_t[t]) * future_gae
-                future_gae = gaes[t]
-
-            # Target is V(s) + A(s,a)
-            targets = Vs[:-1] + gaes
-            return gaes, targets
+        if self.exp_strat.get_strategy() == "entropy_reg":
+            # Add entropy regularization term
+            beta = self.exp_strat.get_exploration_param()
+            entropies_t = torch.stack(entropies).to(self.device)
+            actor_loss += -beta * entropies_t.mean()
+        self.actor_opt.zero_grad()
+        actor_loss.backward()
+        self.actor_opt.step()
 
     def update(self, log_probs, entropies, rewards, states, dones):
         """
@@ -407,40 +351,20 @@ class A2CAgent(BaseAgent):
         dones_t = torch.FloatTensor(dones).to(self.device)
 
         # Ensure the correct shapes
-        assert len(states_t) == T + 1
-        assert len(rewards_t) == T
-        assert len(dones_t) == T
-        assert len(log_probs) == T
+        # entropies_t.shape == log_probs_t.shape
+        self._check_parameter_shapes(T, states_t, rewards_t, dones_t, log_probs)
         
         # Compute all state values at once
         Vs = self.critic(states_t).view(T + 1, self.env.num_envs)
 
         # Compute advantages and targets
-        # pass Vs without gradient information
-        advantages, targets = self.approx_func(
-            rewards_t, dones_t, Vs, T
-        )
-
-        # normalize advantages
-        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+        advantages, targets = self.compute_advantages(rewards_t, dones_t, Vs, T)
 
         # Update critic to minimize TD error        
-        critic_loss = self.criterion(Vs[:-1], targets)
-        self.critic_opt.zero_grad()
-        critic_loss.backward()
-        self.critic_opt.step()
+        self._update_critic(Vs, targets)
 
         # Update actor to maximize expected advantage
-        actor_loss = -(torch.stack(log_probs) * advantages.detach()).mean()
-
-        if self.exp_strat.get_strategy() == "entropy_reg":
-            # Add entropy regularization term
-            beta = self.exp_strat.get_exploration_param()
-            entropies_t = torch.stack(entropies).to(self.device)
-            actor_loss += -beta * entropies_t.mean()
-        self.actor_opt.zero_grad()
-        actor_loss.backward()
-        self.actor_opt.step()
+        self._update_actor(log_probs, advantages, entropies)
 
     def select_action(self, state: np.array):
         """Sample action from actor network."""
@@ -523,9 +447,20 @@ class A2CAgent(BaseAgent):
 
         return rewards_all
 
-class PPOAgent(BaseAgent):
+class PPOAgent(A2CAgent):
+    """
+    Proximal Policy Optimization (PPO) Agent implementation.
+
+    Only uses GAE for advantage estimation.
+    """
     def __init__(self, cfg):
         super().__init__(cfg)
+        # override advantage function to always use GAE
+        self.approx_func = self.gae
+
+        # Criterion
+        self.criterion = nn.MSELoss(reduction='mean')
+        self.minibatch_size = cfg.get("ppo_minibatch_size", 64)
     
     def _get_agent_prefix(self):
         return "ppo"
@@ -533,9 +468,140 @@ class PPOAgent(BaseAgent):
     def select_action(self, state):
         pass
 
-    def update(self, trajectories):
-        pass
+    def _update_actor(self, log_probs, advantages, entropies):
+        """
+        PPO-specific actor update using clipped surrogate objective.
+        """
+
+        
     
+    def update(self, old_log_probs, entropies, rewards, states, dones):
+        """
+        Update both the actor and the critic networks.
+
+        Args:
+            old_log_probs (list of torch.Tensor): list of log probabilities for each action.
+            rewards (list of float): list of rewards for each state-action pair.
+            states (list of np.array): list of states for each state-action pair.
+            dones (list of bool): list of done flags for each state-action pair.
+        """
+        T = len(rewards)
+        states_t = torch.FloatTensor(states).to(self.device)
+        rewards_t = torch.FloatTensor(rewards).to(self.device)
+        old_log_probs_t = torch.FloatTensor(old_log_probs).to(self.device)
+        dones_t = torch.FloatTensor(dones).to(self.device)
+
+        # Ensure the correct shapes
+        assert len(states_t) == T + 1
+        assert len(rewards_t) == T
+        assert len(dones_t) == T
+        assert len(old_log_probs_t) == T
+
+        # Compute all state values at once
+        Vs = self.critic(states_t).view(T + 1, self.env.num_envs)
+
+        # Compute advantages and targets
+        # pass Vs without gradient information
+        advantages, targets = self.compute_advantages(rewards_t, dones_t, Vs, T)
+
+        # Update critic to minimize TD error (stays the same as A2C)
+        self._update_critic(Vs, targets)
+
+        # convert data to TensorDataset for minibatch sampling
+        dataset = torch.utils.data.TensorDataset(
+            states_t,
+            torch.stack(old_log_probs_t),
+            advantages,
+        )
+        dataloader = torch.utils.data.DataLoader(
+            dataset,
+            batch_size=self.minibatch_size,
+            shuffle=True
+        )
+
+        for (states, old_log_probs, advs) in dataloader:
+            # Compute new log probabilities
+            new_log_probs = self.actor(states)
+            # Update actor to maximize expected advantage
+            actor_loss = -(torch.stack(log_probs) * advantages.detach()).mean()
+
+            if self.exp_strat.get_strategy() == "entropy_reg":
+                # Add entropy regularization term
+                beta = self.exp_strat.get_exploration_param()
+                entropies_t = torch.stack(entropies).to(self.device)
+                actor_loss += -beta * entropies_t.mean()
+            self.actor_opt.zero_grad()
+            actor_loss.backward()
+            self.actor_opt.step()
+
+    def select_action(self, state: np.array):
+        """Sample action from actor network."""
+        if self.env.num_envs == 1:
+            state_t = torch.FloatTensor(state).unsqueeze(0).to(self.device)
+        else:
+            state_t = torch.FloatTensor(state).to(self.device)
+
+        if self.env.action_space_type == "continuous":
+            mean, log_std = self.actor(state_t)
+            std = torch.exp(log_std)
+
+            dist = torch.distributions.Normal(mean, std)
+            action_t = dist.sample()
+            action_t = torch.clamp(action_t, -1, 1)
+            log_prob_t = dist.log_prob(action_t).sum(dim=-1)
+            entropy_t = dist.entropy().sum(dim=-1)
+
+        else:  # Discrete
+            # here, we only need the probabilities
+            _, probs_t = self.actor(state_t)
+
+            dist = torch.distributions.Categorical(probs=probs_t)
+            action_t = dist.sample()
+            log_prob_t = dist.log_prob(action_t)
+            entropy_t = dist.entropy()
+
+        # we need to save the log prob and entropy grads
+        # for the update step
+        return action_t.cpu().numpy(), log_prob_t, entropy_t
+
     def train(self):
-        pass
+        print(f"Starting training for A2C...")
+        rewards_all = []
+
+        for ep in range(self.num_episodes):
+            env = self.env.get_env(ep)
+            state, _ = env.reset()
+            rewards, states, dones = [], [], []
+            log_probs, entropies = [], []
+            total: float = 0.0
+
+            # Trajectory collection phase
+            # collect rollout
+            for t in range(self.max_steps):
+                actions, log_probs_t, entropies_t = self.select_action(state)
+                next_state, reward, done, trunc, _ = env.step(actions)
+
+                log_probs.append(log_probs_t)
+                entropies.append(entropies_t)
+                rewards.append(reward)
+                states.append(next_state)
+                dones.append(np.array(done) | np.array(trunc))
+
+                state = next_state
+
+            # Update phase
+
+            
+
+            # convert to numpy array for better performance
+            states = np.array(states)
+            rewards = np.array(rewards)
+            dones = np.array(dones)
+            self.update(log_probs, entropies, rewards, states, dones)
+            # TODO: Add entropy regularization call here
+            # self.decay_exploration_param()
+            rewards_all.append(total)
+            self.print_progress(ep, total, rewards_all)
+
+        return rewards_all
 
