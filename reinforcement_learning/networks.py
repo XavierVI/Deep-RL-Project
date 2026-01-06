@@ -92,7 +92,56 @@ class ContinuousPolicyNet(nn.Module):
 
 
 # --------------------------------------------------------------- #
-#              Small Transformer for Enemy Localization            #
+#                        CNN Networks                             #
+# --------------------------------------------------------------- #
+class VisionPolicyNet(nn.Module):
+    def __init__(self, img_width, img_height, channels, a_dim, act):
+        super().__init__()
+
+        act_fn = getattr(F, act)
+        print(f"Using activation function: {act}")
+        self.layers = nn.ModuleList()
+
+        self.conv1 = nn.Conv2d(channels, 16, kernel_size=8, stride=4)
+        self.conv2 = nn.Conv2d(16, 32, kernel_size=4, stride=2)
+        self.conv3 = nn.Conv2d(32, 64, kernel_size=2, stride=2)
+
+        # Calculate the size of the output from conv layers
+        convw = self._conv2d_size_out(
+            self._conv2d_size_out(
+                self._conv2d_size_out(
+                    img_width, kernel_size=8, stride=4
+                ), kernel_size=4, stride=2
+            ), kernel_size=2, stride=2
+        )
+        convh = self._conv2d_size_out(
+            self._conv2d_size_out(
+                self._conv2d_size_out(
+                    img_height, kernel_size=8, stride=4
+                ), kernel_size=4, stride=2
+            ), kernel_size=2, stride=2
+        )
+        linear_input_size = convw * convh * 64
+
+        self.fc1 = nn.Linear(linear_input_size, 512)
+        self.out = nn.Linear(512, a_dim)
+
+    def _conv2d_size_out(self, size, kernel_size=5, stride=2):
+        return (size - (kernel_size - 1) - 1) // stride + 1
+
+    def forward(self, x):
+        x = F.relu(self.conv1(x))
+        x = F.relu(self.conv2(x))
+        x = F.relu(self.conv3(x))
+        x = x.view(x.size(0), -1)  # Flatten
+        x = F.relu(self.fc1(x))
+        x = self.out(x)
+        return x
+
+
+
+# --------------------------------------------------------------- #
+#              Small Transformer for Enemy Localization           #
 # --------------------------------------------------------------- #
 class TransformerEnemyLocalizerHead(nn.Module):
     """
